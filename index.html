@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover, maximum-scale=1.0">
+<title>Pool</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0a1a;touch-action:none;position:fixed;top:0;left:0;right:0;bottom:0}
+canvas{display:block}
+.btn-group{position:fixed;bottom:20px;right:20px;display:flex;gap:10px;z-index:100}
+.btn-icon{width:44px;height:44px;border-radius:50%;background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.6);border:1px solid rgba(255,255,255,0.15);font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);touch-action:manipulation;overflow:hidden}
+.btn-img{width:24px;height:24px;display:block}
+#modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.55);z-index:200;align-items:center;justify-content:center}
+#modal-overlay.open{display:flex}
+#modal{background:rgba(255,255,255,0.12);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border-radius:20px;padding:28px 24px;width:88%;max-width:380px;max-height:80vh;overflow-y:auto;border:1px solid rgba(255,255,255,0.15);color:#fff;font-family:system-ui,-apple-system,sans-serif}
+.modal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px;font-size:18px;font-weight:600;color:rgba(255,255,255,0.9)}
+#modal-close{background:none;border:none;color:rgba(255,255,255,0.35);font-size:24px;cursor:pointer;padding:4px;line-height:1;touch-action:manipulation}
+.slider-group{margin-bottom:18px}
+.slider-group label{display:flex;justify-content:space-between;font-size:14px;color:rgba(255,255,255,0.75);margin-bottom:6px}
+.slider-group label span.val{color:#fff;font-weight:500}
+.slider-group input[type=range]{width:100%;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,0.08);height:4px;border-radius:2px;outline:none;margin:0}
+.slider-group input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#4a8aff;cursor:pointer;border:none;box-shadow:0 0 6px rgba(74,138,255,0.3)}
+.slider-group input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#4a8aff;cursor:pointer;border:none}
+#reset-btn{width:100%;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.7);color:#fff;font-weight:600;font:14px system-ui,sans-serif;cursor:pointer;touch-action:manipulation;margin-top:4px}
+</style>
+</head>
+<body>
+<div id="err" style="display:none;position:fixed;top:10px;left:10px;right:10px;color:#f44;background:rgba(0,0,0,.85);padding:16px;font:14px monospace;z-index:999;border-radius:8px;word-break:break-all"></div>
+<div class="btn-group">
+  <button class="btn-icon" id="img-btn"><img src="image_icon.png" class="btn-img"></button>
+  <button class="btn-icon" id="info-btn"><img src="info_icon.png" class="btn-img"></button>
+</div>
+<div id="modal-overlay">
+  <div id="modal">
+    <div class="modal-header"><span>Displacement Tweaks</span><button id="modal-close">&times;</button></div>
+    <div class="slider-group"><label>Intensity <span class="val" id="v-intensity">17</span></label><input type="range" id="s-intensity" min="1" max="60" value="17"></div>
+    <div class="slider-group"><label>Drift Speed <span class="val" id="v-speed">1.18</span></label><input type="range" id="s-speed" min="0" max="400" value="118"></div>
+    <button id="reset-btn">Reset Defaults</button>
+  </div>
+</div>
+<script src="pixi.min.js"></script>
+<script src="matter.min.js"></script>
+<script>
+const errDiv = document.getElementById('err');
+window.onerror = (m,u,l) => { errDiv.style.display='block'; errDiv.textContent='Error: '+m+' line:'+l; return true; };
+
+const cfg = { intensity: 17, speed: 1.18 };
+
+let W, H, DPR, app, starfish, dispSprite, dispFilter, duckContainer, duckSprite, duckShadow;
+let engine, world, duckBody, walls = [];
+let floatingImg, floatingFilter;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  if (app) {
+    app.renderer.resize(W * DPR, H * DPR);
+    app.renderer.view.style.width = W + 'px';
+    app.renderer.view.style.height = H + 'px';
+  }
+  if (starfish) { starfish.width = W; starfish.height = H; }
+  if (duckBody) {
+    if (duckBody.position.x < -EDGE || duckBody.position.x > W + EDGE ||
+        duckBody.position.y < -EDGE || duckBody.position.y > H + EDGE) {
+      Matter.Body.setPosition(duckBody, { x: W/2, y: H/2 });
+      Matter.Body.setVelocity(duckBody, { x: 0, y: 0 });
+    }
+  }
+  if (world) makeWalls();
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- Generate smooth noise texture for displacement ---
+function makeNoise(size, cells) {
+  const cellSize = size / cells;
+  const grid = [];
+  for (let y = 0; y <= cells; y++) {
+    grid[y] = [];
+    for (let x = 0; x <= cells; x++) {
+      grid[y][x] = Math.random();
+    }
+  }
+  // Make seamless by matching opposite edges
+  for (let y = 0; y <= cells; y++) { grid[y][cells] = grid[y][0]; }
+  for (let x = 0; x <= cells; x++) { grid[cells][x] = grid[0][x]; }
+  grid[cells][cells] = grid[0][0];
+
+  const c = document.createElement('canvas');
+  c.width = size; c.height = size;
+  const ctx = c.getContext('2d');
+  const d = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const gx = x / cellSize, gy = y / cellSize;
+      const ix = Math.floor(gx), iy = Math.floor(gy);
+      const fx = gx - ix, fy = gy - iy;
+      const sx = fx * fx * (3 - 2 * fx);
+      const sy = fy * fy * (3 - 2 * fy);
+      const top = grid[iy][ix] + (grid[iy][ix + 1] - grid[iy][ix]) * sx;
+      const bot = grid[iy + 1][ix] + (grid[iy + 1][ix + 1] - grid[iy + 1][ix]) * sx;
+      const v = (top + (bot - top) * sy) * 255;
+      const i = (y * size + x) * 4;
+      d.data[i] = v; d.data[i + 1] = v; d.data[i + 2] = v; d.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(d, 0, 0);
+  return c;
+}
+
+// --- PixiJS setup ---
+function initPixi() {
+  app = new PIXI.Application({
+    width: W,
+    height: H,
+    backgroundColor: 0x0a1a2a,
+    resolution: DPR,
+    autoDensity: true,
+    antialias: true,
+  });
+  document.body.prepend(app.view);
+
+  // Starfish background
+  starfish = new PIXI.Sprite(PIXI.Texture.from('Splash.png'));
+  starfish.width = W;
+  starfish.height = H;
+  app.stage.addChild(starfish);
+
+  // Displacement map
+  const noiseCanvas = makeNoise(512, 6);
+  const dispTex = PIXI.Texture.from(noiseCanvas);
+  dispSprite = new PIXI.Sprite(dispTex);
+  dispSprite.texture.baseTexture.wrapMode = 'repeat';
+  dispSprite.renderable = false;
+
+  dispFilter = new PIXI.DisplacementFilter(dispSprite, cfg.intensity);
+  starfish.filters = [dispFilter];
+  app.stage.addChild(dispSprite);
+
+  // Duck container
+  duckContainer = new PIXI.Container();
+  app.stage.addChild(duckContainer);
+
+  // Shadow
+  duckShadow = new PIXI.Sprite(PIXI.Texture.from('duck2.png'));
+  duckShadow.anchor.set(0.5);
+  duckShadow.scale.set(1/6);
+  duckShadow.tint = 0x000000;
+  duckShadow.alpha = 0.15;
+  duckShadow.filters = [new PIXI.BlurFilter(12)];
+  duckShadow.y = 45;
+  duckContainer.addChild(duckShadow);
+
+  // Duck sprite (1/6 size)
+  duckSprite = new PIXI.Sprite(PIXI.Texture.from('duck2.png'));
+  duckSprite.anchor.set(0.5);
+  duckSprite.scale.set(1/6);
+  duckContainer.addChild(duckSprite);
+}
+
+initPixi();
+
+// --- Matter.js ---
+const DR = 24;
+const EDGE = 6;
+engine = Matter.Engine.create({ gravity: { x: 0, y: 0 } });
+world = engine.world;
+duckBody = Matter.Bodies.circle(W/2, H/2, DR, {
+  restitution: 0.92,
+  friction: 0.002,
+  frictionAir: 0.008,
+  density: 0.002,
+  inertia: Infinity,
+  label: 'duck'
+});
+function makeWalls() {
+  if (walls.length) Matter.World.remove(world, walls);
+  const WT = 40;
+  const wOpts = { isStatic: true, restitution: 0.9, friction: 0, density: 1 };
+  walls = [
+    Matter.Bodies.rectangle(-EDGE - WT/2, H/2, WT, H*3, wOpts),
+    Matter.Bodies.rectangle(W + EDGE + WT/2, H/2, WT, H*3, wOpts),
+    Matter.Bodies.rectangle(W/2, -EDGE - WT/2, W*2, WT, wOpts),
+    Matter.Bodies.rectangle(W/2, H + EDGE + WT/2, W*2, WT, wOpts),
+  ];
+  Matter.World.add(world, walls);
+}
+Matter.World.add(world, duckBody);
+makeWalls();
+
+// Quack sound (visual) on collision
+Matter.Events.on(engine, 'collisionStart', (event) => {
+  for (const pair of event.pairs) {
+    if (pair.bodyA === duckBody || pair.bodyB === duckBody) {
+      const other = pair.bodyA === duckBody ? pair.bodyB : pair.bodyA;
+      const spd = Math.sqrt(
+        duckBody.velocity.x ** 2 + duckBody.velocity.y ** 2
+      );
+      if (spd > 1) {
+        Matter.Body.setAngularVelocity(
+          duckBody,
+          (Math.random() - 0.5) * spd * 0.12
+        );
+      }
+      if (spd > 1.5 && other.isStatic && navigator.vibrate) {
+        navigator.vibrate(10);
+      }
+    }
+  }
+});
+
+// --- Touch (2D) ---
+let drag = false, ltx = 0, lty = 0, ltt = 0, tvx = 0, tvy = 0;
+let lastActiveTime = performance.now();
+const idlePhaseX = Math.random() * Math.PI * 2;
+const idlePhaseY = Math.random() * Math.PI * 2;
+
+function getPos(e) {
+  const rect = app.view.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return {
+    x: (t.clientX - rect.left) * (W / rect.width),
+    y: (t.clientY - rect.top) * (H / rect.height),
+  };
+}
+
+function onDuck(p) {
+  const dx = p.x - duckBody.position.x;
+  const dy = p.y - duckBody.position.y;
+  return Math.sqrt(dx*dx + dy*dy) < 72; // DR * 3
+}
+
+function startDrag(e) {
+  e.preventDefault();
+  const p = getPos(e);
+  if (!onDuck(p)) return;
+  drag = true;
+  ltx = p.x; lty = p.y;
+  ltt = performance.now();
+  tvx = 0; tvy = 0;
+  lastActiveTime = performance.now();
+  Matter.Body.setVelocity(duckBody, { x: 0, y: 0 });
+}
+
+function moveDrag(e) {
+  e.preventDefault();
+  if (!drag) return;
+  const p = getPos(e);
+  const dx = p.x - ltx, dy = p.y - lty;
+  const dt = performance.now() - ltt;
+  if (dt > 0) { tvx = dx / (dt / 16.67); tvy = dy / (dt / 16.67); }
+  ltx = p.x; lty = p.y; ltt = performance.now();
+  lastActiveTime = performance.now();
+  const DR = 24;
+  Matter.Body.setPosition(duckBody, {
+    x: Math.max(-EDGE + DR, Math.min(W + EDGE - DR, duckBody.position.x + dx)),
+    y: Math.max(-EDGE + DR, Math.min(H + EDGE - DR, duckBody.position.y + dy)),
+  });
+  Matter.Body.setVelocity(duckBody, { x: dx * 0.5, y: dy * 0.5 });
+}
+
+function endDrag(e) {
+  if (!drag) return;
+  drag = false;
+  lastActiveTime = performance.now();
+  Matter.Body.setVelocity(duckBody, {
+    x: Math.max(-10, Math.min(10, tvx * 0.7)),
+    y: Math.max(-10, Math.min(10, tvy * 0.7)),
+  });
+}
+
+const view = app.view;
+view.addEventListener('touchstart', startDrag, { passive: false });
+view.addEventListener('touchmove', moveDrag, { passive: false });
+view.addEventListener('touchend', endDrag);
+view.addEventListener('touchcancel', () => { drag = false; });
+view.addEventListener('mousedown', startDrag);
+view.addEventListener('mousemove', moveDrag);
+view.addEventListener('mouseup', endDrag);
+view.addEventListener('mouseleave', () => { drag = false; });
+
+// --- Displacement tweaks modal ---
+const infoBtn = document.getElementById('info-btn');
+const imgBtn = document.getElementById('img-btn');
+const modalOverlay = document.getElementById('modal-overlay');
+const modalClose = document.getElementById('modal-close');
+const sliderMap = {
+  intensity: document.getElementById('s-intensity'),
+  speed: document.getElementById('s-speed'),
+};
+const valMap = {
+  intensity: document.getElementById('v-intensity'),
+  speed: document.getElementById('v-speed'),
+};
+
+infoBtn.addEventListener('click', () => modalOverlay.classList.add('open'));
+infoBtn.addEventListener('touchend', (e) => { e.preventDefault(); modalOverlay.classList.add('open'); });
+modalClose.addEventListener('click', () => modalOverlay.classList.remove('open'));
+modalClose.addEventListener('touchend', (e) => { e.preventDefault(); modalOverlay.classList.remove('open'); });
+modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) modalOverlay.classList.remove('open'); });
+
+function spawnFloatingImage() {
+  if (floatingImg) { app.stage.removeChild(floatingImg); floatingImg = null; floatingFilter = null; }
+  const img = new Image();
+  img.onload = function() {
+    const pad = 30;
+    const r = 8;
+    const c = document.createElement('canvas');
+    c.width = img.width + pad * 2;
+    c.height = img.height + pad * 2;
+    const ctx = c.getContext('2d');
+    ctx.beginPath();
+    ctx.moveTo(pad + r, pad);
+    ctx.lineTo(pad + img.width - r, pad);
+    ctx.quadraticCurveTo(pad + img.width, pad, pad + img.width, pad + r);
+    ctx.lineTo(pad + img.width, pad + img.height - r);
+    ctx.quadraticCurveTo(pad + img.width, pad + img.height, pad + img.width - r, pad + img.height);
+    ctx.lineTo(pad + r, pad + img.height);
+    ctx.quadraticCurveTo(pad, pad + img.height, pad, pad + img.height - r);
+    ctx.lineTo(pad, pad + r);
+    ctx.quadraticCurveTo(pad, pad, pad + r, pad);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(img, pad, pad);
+    const tex = PIXI.Texture.from(c);
+    floatingImg = new PIXI.Sprite(tex);
+    floatingImg.anchor.set(0.5);
+    floatingImg.alpha = 0.9;
+    const sc = Math.min(W / c.width, H / c.height) * 0.3;
+    floatingImg.scale.set(sc);
+    floatingImg.x = W / 2;
+    floatingImg.y = H + (c.height * sc) / 2;
+    floatingFilter = new PIXI.DisplacementFilter(dispSprite, cfg.intensity);
+    floatingImg.filters = [floatingFilter];
+    app.stage.addChild(floatingImg);
+  };
+  img.src = 'IMG_2158.PNG';
+}
+
+imgBtn.addEventListener('click', spawnFloatingImage);
+imgBtn.addEventListener('touchend', (e) => { e.preventDefault(); spawnFloatingImage(); });
+
+function applySliders() {
+  cfg.intensity = +sliderMap.intensity.value;
+  cfg.speed = sliderMap.speed.value / 100;
+  for (const key of Object.keys(cfg)) {
+    valMap[key].textContent = key === 'speed' ? cfg.speed.toFixed(2) : cfg[key];
+  }
+}
+
+function resetDefaults() {
+  const defs = { intensity: 17, speed: 1.18 };
+  sliderMap.intensity.value = defs.intensity;
+  sliderMap.speed.value = defs.speed * 100;
+  Object.assign(cfg, defs);
+  for (const key of Object.keys(cfg)) {
+    valMap[key].textContent = key === 'speed' ? cfg.speed.toFixed(2) : cfg[key];
+  }
+}
+
+for (const el of Object.values(sliderMap)) {
+  el.addEventListener('input', applySliders);
+}
+
+document.getElementById('reset-btn').addEventListener('click', resetDefaults);
+document.getElementById('reset-btn').addEventListener('touchend', (e) => { e.preventDefault(); resetDefaults(); });
+
+// --- Main loop ---
+let frameCount = 0;
+
+app.ticker.add(() => {
+  frameCount++;
+
+  // Animate displacement (slow drift)
+  dispSprite.x += cfg.speed;
+  dispSprite.y += cfg.speed * 0.5;
+
+  // Displacement scale
+  dispFilter.scale.x = cfg.intensity;
+  dispFilter.scale.y = cfg.intensity;
+
+  // Physics
+  Matter.Engine.update(engine, 16.67);
+
+  // Idle drift (gentle wave motion after 2s)
+  if (performance.now() - lastActiveTime > 2000 && !drag) {
+    const t = frameCount * 0.0015;
+    Matter.Body.applyForce(duckBody, duckBody.position, {
+      x: Math.sin(t + idlePhaseX) * 0.00006,
+      y: Math.sin(t * 0.6 + idlePhaseY) * 0.00004,
+    });
+    Matter.Body.setAngularVelocity(duckBody,
+      Math.sin(t * 1.2 + idlePhaseX) * 0.002
+    );
+  }
+
+  // Sync duck sprite to physics body
+  duckContainer.x = duckBody.position.x;
+  duckContainer.y = duckBody.position.y;
+  duckSprite.rotation = duckBody.angle;
+  duckShadow.rotation = duckBody.angle;
+
+  // Floating image animation
+  if (floatingImg) {
+    const totalDist = H + floatingImg.height;
+    const step = totalDist / (40 * 60);
+    floatingImg.y -= step;
+    if (floatingFilter) {
+      floatingFilter.scale.x = cfg.intensity;
+      floatingFilter.scale.y = cfg.intensity;
+    }
+    if (floatingImg.y < -floatingImg.height) {
+      app.stage.removeChild(floatingImg);
+      floatingImg = null;
+      floatingFilter = null;
+    }
+  }
+});
+</script>
+</body>
+</html>
